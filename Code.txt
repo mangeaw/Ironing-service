@@ -1,0 +1,196 @@
+var CHANNEL_ACCESS_TOKEN = 'TIuyojTLfFjj861STFgCYFzgqow3UrEnU8HCXhh/mit+dyPaJAiMdpMFbykE5BfaHZ7gar6AbY2YuWh/EUpi2piDyEZUMLn/364wjHv/iVSvbmVTdKwF8IDwjyEfIY19ITuEqFyzRBDsg+VcNrOU9QdB04t89/1O/w1cDnyilFU=';
+var SS = SpreadsheetApp.getActiveSpreadsheet();
+var ORDER_SHEET = SS.getSheetByName('Orders'); 
+var CUSTOMER_SHEET = SS.getSheetByName('Customers'); 
+var CAPACITY_LIMIT = 80; 
+
+var STATUS_FLOW = ["Waiting", "In Queue", "Ironing", "QA Checked", "Ready for Pickup"];
+
+function doPost(e) {
+  try {
+    var contents = JSON.parse(e.postData.contents);
+    var event = contents.events[0];
+    var replyToken = event.replyToken;
+    var userId = event.source.userId;
+    var profile = getUserProfile(userId);
+    var displayName = profile.displayName;
+
+    if (event.type === 'message' && event.message.type === 'text') {
+      var userText = event.message.text.trim();
+      var customerData = getCustomerInfo(userId);
+
+      if (!customerData || !customerData.phone) {
+        var parts = userText.split(/\s+/);
+        if (parts.length >= 2) {
+          CUSTOMER_SHEET.appendRow([userId, displayName, parts[0], parts[1]]);
+          sendReply(replyToken, "ลงทะเบียนเรียบร้อยค่ะ! ✨ พิมพ์ 'จองคิว' เพื่อเริ่มบริการนะคะ");
+        } else {
+          sendReply(replyToken, "ยินดีต้อนรับค่ะ! รบกวนพิมพ์ 'ที่อยู่' เว้นวรรคตามด้วย 'เบอร์โทร' เพื่อลงทะเบียนค่ะ");
+        }
+      } 
+      else if (userText === "เช็กสถานะ" || userText === "สถานะ") {
+        var lastRow = findLastOrderRow(userId);
+        if (lastRow > 0) {
+          var rowData = ORDER_SHEET.getRange(lastRow, 1, 1, 15).getValues()[0];
+          var statusMsg = "🔍 สถานะล่าสุดของคุณ " + displayName + ":\n" +
+                          "📍 งานรีด: " + translateStatus(rowData[10]) + "\n" +
+                          "💳 การเงิน: " + rowData[11] + "\n" +
+                          "📅 คาดว่าเสร็จ: " + Utilities.formatDate(new Date(rowData[5]), "GMT+7", "dd/MM/yyyy");
+          sendReply(replyToken, statusMsg);
+        } else {
+          sendReply(replyToken, "ยังไม่มีประวัติการจองค่ะ พิมพ์ 'จองคิว' ได้เลยนะคะ");
+        }
+      }
+
+      else if (userText === "จองคิว") {
+        if (getTodayPiecesCount() >= CAPACITY_LIMIT) {
+          sendReply(replyToken, "ขออภัยค่ะ วันนี้โควตาเต็ม 80 ชิ้นแล้วนะคะ 🙏");
+          return;
+        }
+        var estPickup = new Date();
+        estPickup.setDate(estPickup.getDate() + 2); 
+        recordOrder(userId, displayName, customerData.address, customerData.phone, "", estPickup);
+        
+        var estStr = Utilities.formatDate(estPickup, "GMT+7", "dd/MM/yyyy");
+        sendReply(replyToken, "รับทราบค่ะ! ขณะนี้มีคิวก่อนหน้า " + getWaitingQueues() + " คิว\n📅 คาดว่าเสร็จวันที่: " + estStr + "\nรบกวนแจ้ง 'วันที่สะดวกส่งผ้า' นะคะ ✨");
+      } 
+
+      else if (userText === "อนุมัติซ่อม" || userText === "ไม่ซ่อม") {
+        updateRepairStatus(userId, (userText === "อนุมัติซ่อม" ? "Approved" : "Rejected"), "บันทึกเรียบร้อยค่ะ ✨", replyToken);
+      }
+
+      else {
+        var lastRow = findLastOrderRow(userId);
+        if (lastRow > 0 && ORDER_SHEET.getRange(lastRow, 5).getValue() === "") {
+          ORDER_SHEET.getRange(lastRow, 5).setValue(userText);
+          sendReply(replyToken, "บันทึกวันนัดส่งผ้าเรียบร้อยค่ะ 🙏");
+        }
+      }
+    }
+
+    if (event.type === 'message' && event.message.type === 'image') {
+      var lastRow = findLastOrderRow(userId); 
+      if (lastRow > 0) {
+        ORDER_SHEET.getRange(lastRow, 12).setValue("Pending Payment"); // แก้เป็น L (12)
+        sendReply(replyToken, "ได้รับสลิปแล้วค่ะ ขอตรวจสอบยอดสักครู่นะคะ ✨");
+      }
+    }
+  } catch (err) { console.log(err.message); }
+}
+
+function onEdit(e) {
+  var range = e.range;
+  var sheet = range.getSheet();
+  var row = range.getRow();
+  var col = range.getColumn();
+  
+  if (sheet.getName() === "Orders" && row > 1) {
+    var userId = sheet.getRange(row, 14).getValue(); // LINE ID เลื่อนมาอยู่ N (14)
+    var name = sheet.getRange(row, 2).getValue();
+    
+    if (name !== "") {
+      sheet.getRange(row, 15).setValue(new Date()); // Timestamp เลื่อนมาอยู่ O (15)
+    }
+
+    if (col === 11) { // คอลัมน์ K: สถานะงาน
+      var newValue = e.value;
+      var oldValue = e.oldValue;
+      var newIdx = STATUS_FLOW.indexOf(newValue);
+      var oldIdx = STATUS_FLOW.indexOf(oldValue);
+      if (newIdx !== -1 && newIdx !== oldIdx + 1 && newValue !== "Waiting") {
+        range.setValue(oldValue); 
+        return;
+      }
+      
+      if (newValue === "QA Checked") {
+        var totalPrice = sheet.getRange(row, 10).getValue(); // J: รวม
+        if (totalPrice > 0 && userId) {
+          var msg = "🌟 ตรวจสอบผ้าเรียบร้อยค่ะ!\nยอดรวมของคุณ " + name + " คือ " + totalPrice + " บาท\nรบกวนโอนเงินและส่งสลิปยืนยันด้วยนะคะ 🙏";
+          pushMessage(userId, msg);
+        }
+      }
+      if (newValue === "Ready for Pickup") {
+        pushMessage(userId, "✅ คุณ " + name + " คะ ผ้ารีดเสร็จแล้ว มารับได้เลยค่ะ ✨");
+      }
+    }
+
+    if (col === 12) { // คอลัมน์ L: การเงิน (เลื่อนมาจาก M)
+      if (e.value === "Paid") pushMessage(userId, "🙏 ได้รับยอดเงินเรียบร้อย ขอบคุณค่ะ!");
+      else if (e.value === "Rejected") pushMessage(userId, "❌ สลิปไม่ถูกต้อง รบกวนส่งใหม่อีกครั้งนะคะ");
+    }
+
+    if (col === 13) { // คอลัมน์ M: สถานะซ่อม (เลื่อนมาจาก N)
+      if (e.value === "Waiting for Approval") {
+        pushMessage(userId, "🚨 คุณ " + name + " คะ พบจุดชำรุดบนผ้า รบกวนพิมพ์ 'อนุมัติซ่อม' หรือ 'ไม่ซ่อม' ค่ะ");
+      }
+    }
+  }
+}
+
+// --- Helper Functions ---
+function translateStatus(status) {
+  var map = {"Waiting": "รอรับผ้า", "In Queue": "รอคิวรีด", "Ironing": "กำลังรีด", "QA Checked": "รีดเสร็จ/รอส่งยอด", "Ready for Pickup": "พร้อมส่งคืน"};
+  return map[status] || status;
+}
+
+function recordOrder(userId, name, address, phone, dropOff, pickup) {
+  var now = new Date();
+  // บันทึก 15 คอลัมน์รวดเดียว (A ถึง O)
+  ORDER_SHEET.appendRow([now, name, address, phone, dropOff, pickup, "", "", "", "", "Waiting", "Waiting for Slip", "No Issues", userId, now]);
+}
+
+function findLastOrderRow(userId) {
+  var data = ORDER_SHEET.getDataRange().getValues();
+  for (var i = data.length - 1; i >= 1; i--) { if (data[i][13] == userId) return i + 1; } // เช็กที่คอลัมน์ N (13)
+  return 0;
+}
+
+function getWaitingQueues() {
+  var data = ORDER_SHEET.getDataRange().getValues();
+  var count = 0;
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][1] !== "" && data[i][10] !== "Ready for Pickup" && data[i][10] !== "") { count++; }
+  }
+  return count;
+}
+
+function getTodayPiecesCount() {
+  var data = ORDER_SHEET.getDataRange().getValues();
+  var today = new Date().setHours(0,0,0,0);
+  var total = 0;
+  for (var i = 1; i < data.length; i++) {
+    var rowDate = new Date(data[i][0]);
+    if (data[i][1] !== "" && rowDate instanceof Date && rowDate.setHours(0,0,0,0) === today) {
+      total += (Number(data[i][6]) || 0) + (Number(data[i][7]) || 0) + (Number(data[i][8]) || 0);
+    }
+  }
+  return total;
+}
+
+function getUserProfile(userId) {
+  var url = 'https://api.line.me/v2/bot/profile/' + userId;
+  var response = UrlFetchApp.fetch(url, { 'headers': { 'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN } });
+  return JSON.parse(response.getContentText());
+}
+
+function getCustomerInfo(userId) {
+  if (!CUSTOMER_SHEET) return null;
+  var data = CUSTOMER_SHEET.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) { if (data[i][0] == userId) return { name: data[i][1], address: data[i][2], phone: data[i][3] }; }
+  return null;
+}
+
+function sendReply(replyToken, text) {
+  var url = 'https://api.line.me/v2/bot/message/reply';
+  UrlFetchApp.fetch(url, { 'headers': { 'Content-Type': 'application/json; charset=UTF-8', 'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN }, 'method': 'post', 'payload': JSON.stringify({ 'replyToken': replyToken, 'messages': [{ 'type': 'text', 'text': text }] }) });
+}
+
+function pushMessage(userId, text) {
+  var url = 'https://api.line.me/v2/bot/message/push';
+  UrlFetchApp.fetch(url, { 'headers': { 'Content-Type': 'application/json; charset=UTF-8', 'Authorization': 'Bearer ' + CHANNEL_ACCESS_TOKEN }, 'method': 'post', 'payload': JSON.stringify({ 'to': userId, 'messages': [{ 'type': 'text', 'text': text }] }) });
+}
+
+function updateRepairStatus(userId, status, replyText, replyToken) {
+  var lastRow = findLastOrderRow(userId);
+  if (lastRow > 0) { ORDER_SHEET.getRange(lastRow, 13).setValue(status); sendReply(replyToken, replyText); } // คอลัมน์ M (13)
+}
