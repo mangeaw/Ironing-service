@@ -17,7 +17,7 @@ Ironing Service
 
 ## 📂 โครงสร้างเอกสาร (Documentation)
 โปรเจกต์นี้มีการออกแบบระบบอย่างเป็นขั้นตอน:
-- **DFD (Data Flow Diagrams):** ครอบคลุมตั้งแตระดับ Context Diagram จนถึงระดับ Primitive Process
+- **DFD (Data Flow Diagrams):** ครอบคลุมตั้งแต่ระดับ Context Diagram จนถึงระดับ Primitive Process
 - **Use Cases:** ครอบคลุม Business Use Case (BUC) และ System Use Case (SUC) เพื่อแสดงขั้นตอนการทำงานของ Actor แต่ละส่วน
 
 ## 👥 ทีมงานผู้พัฒนา (Our Team)
